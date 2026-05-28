@@ -1,5 +1,7 @@
 # @konfidant/sdk
 
+[![Codacy Badge](https://app.codacy.com/project/badge/Grade/1ba1a70f10384a8f9a65d4757785b678)](https://app.codacy.com/gh/konfidant/sdk-js/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+
 Official JavaScript/TypeScript SDK for the [Konfidant](https://www.konfidant.app) API.
 
 Konfidant lets you share secrets — encrypted text and files — that self-destruct after being read.
