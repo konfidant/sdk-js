@@ -1,6 +1,6 @@
 {
   "name": "@konfidant/sdk",
-  "version": "0.1.0",
+  "version": "0.0.3",
   "description": "Official JavaScript SDK for the Konfidant API",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
