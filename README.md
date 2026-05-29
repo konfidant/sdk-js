@@ -34,6 +34,7 @@ const { share_url } = await client.shareText({
   text: 'super-secret-password',
   ttl_hours: 24,
 });
+
 console.log('Share this link:', share_url);
 ```
 
@@ -55,9 +56,9 @@ const client = new KonfidantClient({
 
 ### `new KonfidantClient(options)`
 
-| Option    | Type     | Required | Description                                     |
-|-----------|----------|----------|-------------------------------------------------|
-| `apiKey`  | `string` | Yes      | Your Konfidant API key                          |
+| Option    | Type     | Required | Description                                                  |
+|-----------|----------|----------|--------------------------------------------------------------|
+| `apiKey`  | `string` | Yes      | Your Konfidant API key                                       |
 | `baseUrl` | `string` | No       | Override the base URL (default: `https://www.konfidant.app`) |
 
 ---
@@ -96,17 +97,18 @@ const result = await client.shareText({
 
 ### `client.shareFile(request)`
 
-Request a presigned upload URL for a file. Use the returned URL with `uploadFile()` to complete the upload, then poll `getFileStatus()` for the share link.
+Requests a presigned upload URL for a file. Uses the returned URL with `uploadFile()` to complete the upload, then
+polls `getFileStatus()` for the share link.
 
-> For a one-call convenience wrapper, see [`shareAndUploadFile()`](#clientshareanduploadfile).
+> For a one-call convenience wrapper, see `shareAndUploadFile()`.
 
 **Request**
 
-| Field       | Type     | Required | Description                 |
-|-------------|----------|----------|-----------------------------|
+| Field       | Type     | Required | Description                      |
+|-------------|----------|----------|----------------------------------|
 | `filename`  | `string` | Yes      | Original filename with extension |
-| `file_size` | `number` | Yes      | File size in bytes          |
-| `ttl_hours` | `number` | Yes      | Time-to-live in hours       |
+| `file_size` | `number` | Yes      | File size in bytes               |
+| `ttl_hours` | `number` | Yes      | Time-to-live in hours            |
 
 **Response: `ShareFileResponse`**
 
@@ -115,7 +117,7 @@ Request a presigned upload URL for a file. Use the returned URL with `uploadFile
 | `upload_url`       | `string` | Short-lived presigned S3 PUT URL                 |
 | `file_key`         | `string` | Use with `getFileStatus()` and `uploadFile()`    |
 | `poll_url`         | `string` | Convenience URL for status polling               |
-| `metadata_headers` | `object` | Required S3 headers — pass to `uploadFile()`    |
+| `metadata_headers` | `object` | Required S3 headers — pass to `uploadFile()`     |
 
 ---
 
@@ -167,18 +169,20 @@ console.log('Share URL:', status.share_url);
 
 Poll the encryption status of an uploaded file.
 
-| Argument  | Type     | Description                                   |
-|-----------|----------|-----------------------------------------------|
+| Argument  | Type     | Description                                    |
+|-----------|----------|------------------------------------------------|
 | `fileKey` | `string` | The `file_key` from the `shareFile()` response |
 
 **Returns: `FileStatusResponse`**
 
 While processing:
+
 ```ts
 { status: 'processing', message: 'Encryption in progress' }
 ```
 
 When complete:
+
 ```ts
 {
   status: 'complete',
@@ -289,12 +293,12 @@ try {
 
 ### Common error codes
 
-| Status | Meaning                  |
-|--------|--------------------------|
+| Status | Meaning                    |
+|--------|----------------------------|
 | `400`  | Bad request / invalid body |
 | `401`  | Missing or invalid API key |
 | `403`  | Insufficient API key scope |
-| `404`  | Resource not found        |
+| `404`  | Resource not found         |
 
 ---
 

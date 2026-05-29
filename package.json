@@ -24,9 +24,10 @@
   },
   "keywords": [
     "konfidant",
-    "encryption",
-    "secure-share",
-    "sdk"
+    "one-time-secret",
+    "secure-file-transfer",
+    "secure-file-share",
+    "secure-document-sharing"
   ],
   "repository": {
     "type": "git",
