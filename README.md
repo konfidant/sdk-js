@@ -326,9 +326,9 @@ import type {
 ## Development
 
 ```bash
-npm install       # install dependencies
-npm test          # run tests (jest)
-npm run test:coverage  # test + coverage report
-npm run build     # compile to dist/
-npm run lint      # type-check
+npm install           # install dependencies
+npm test              # run tests (jest)
+npm run test:coverage # test + coverage report
+npm run build         # compile to dist/
+npm run lint          # type-check
 ```
