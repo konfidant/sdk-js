@@ -90,6 +90,7 @@ const result = await client.shareText({
   text: 'db-password: hunter2',
   ttl_hours: 48,
 });
+
 // result.share_url → send to recipient
 ```
 
@@ -160,6 +161,7 @@ while (status.status === 'processing') {
   await new Promise((r) => setTimeout(r, 2000));
   status = await client.getFileStatus(presigned.file_key);
 }
+
 console.log('Share URL:', status.share_url);
 ```
 
@@ -227,6 +229,7 @@ List all shares for the authenticated organization.
 
 ```ts
 const { shares, pagination } = await client.listShares({ type: 'file', limit: 10 });
+
 for (const share of shares) {
   console.log(share.file_name, share.created_by, share.expires_at);
 }
