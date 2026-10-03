@@ -1,7 +1,7 @@
 {
   "name": "@konfidant/sdk",
-  "version": "0.9.0",
-  "description": "Official JavaScript SDK for the Konfidant API",
+  "version": "0.10.0",
+  "description": "Official JavaScript SDK for the Konfidant API, with client-side (zero-knowledge) encryption",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -27,7 +27,10 @@
     "one-time-secret",
     "secure-file-transfer",
     "secure-file-share",
-    "secure-document-sharing"
+    "secure-document-sharing",
+    "end-to-end-encryption",
+    "zero-knowledge",
+    "burn-after-reading"
   ],
   "repository": {
     "type": "git",
@@ -40,6 +43,9 @@
     "jest": "^30.4.2",
     "ts-jest": "^29.1.4",
     "tsup": "^8.0.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

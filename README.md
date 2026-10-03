@@ -6,7 +6,12 @@
 
 Official JavaScript/TypeScript SDK for the [Konfidant](https://www.konfidant.app) API.
 
-Konfidant lets you share secrets — encrypted text and files — that self-destruct after being read.
+Konfidant lets you share secrets — text and files — through one-time links that self-destruct after being read.
+The SDK **encrypts everything on your machine** before it is sent: Konfidant only ever stores and delivers
+ciphertext and cannot read what you share.
+
+- Zero runtime dependencies; uses the standard WebCrypto API.
+- Works in Node.js 20+ and modern browsers (ESM and CommonJS builds, full TypeScript types).
 
 ---
 
@@ -27,22 +32,41 @@ pnpm add @konfidant/sdk
 ```ts
 import { KonfidantClient } from '@konfidant/sdk';
 
-const client = new KonfidantClient({ apiKey: 'your-api-key' });
+const client = new KonfidantClient({ apiKey: process.env.KONFIDANT_API_KEY! });
 
-// Share encrypted text
-const { share_url } = await client.shareText({
-  text: 'super-secret-password',
-  ttl_hours: 24,
-});
+const { shareUrl } = await client.shareText('db-password: hunter2', { ttlHours: 24 });
 
-console.log('Share this link:', share_url);
+console.log('Send this link:', shareUrl);
+// https://download.konfidant.app/#t=<one-time token>&k=<decryption key>
 ```
+
+---
+
+## Security model (zero-knowledge)
+
+1. For every share the SDK generates a fresh random 256-bit key and encrypts the content locally with AES-256-GCM
+   (the [KNF1 format](#encryption-format-knf1)). For files, the file name and MIME type are encrypted too.
+2. Only the ciphertext is sent to Konfidant. The API responds with a `download_url` containing a server-issued,
+   single-use token in the URL fragment (`#t=…`).
+3. The SDK appends the key to the fragment: `shareUrl = download_url + "&k=" + base64url(key)`.
+
+The URL **fragment** (everything after `#`) is never sent to any server by browsers or by this SDK. The key
+therefore exists only in the share link: it is never sent to Konfidant, never logged by Konfidant and cannot be
+recovered by Konfidant. The recipient's browser (or `openShare()`) sends only the token, receives the ciphertext
+once — after which it is deleted — and decrypts it locally.
+
+Consequences:
+
+- **Treat `shareUrl` as the secret.** Anyone holding the full link can open it once. Do not log it.
+- If the link is lost, the content cannot be recovered — not even by Konfidant.
+- Konfidant learns only the ciphertext size and when the share was created and opened.
+- The API key is sent only to the API base URL — never to the storage upload URL or to download hosts.
 
 ---
 
 ## Authentication
 
-All requests require a Bearer API key. Generate one from the Konfidant dashboard.
+All API requests use a Bearer API key. Generate one in the Konfidant dashboard.
 
 ```ts
 const client = new KonfidantClient({
@@ -50,281 +74,228 @@ const client = new KonfidantClient({
 });
 ```
 
+Opening a share (`openShare()`) needs no API key: the link alone grants one-time access.
+
 ---
 
-## API Reference
+## API reference
 
 ### `new KonfidantClient(options)`
 
 | Option    | Type     | Required | Description                                                  |
 |-----------|----------|----------|--------------------------------------------------------------|
 | `apiKey`  | `string` | Yes      | Your Konfidant API key                                       |
-| `baseUrl` | `string` | No       | Override the base URL (default: `https://www.konfidant.app`) |
+| `baseUrl` | `string` | No       | Override the API base URL (default: `https://www.konfidant.app`) |
 
 ---
 
-### `client.shareText(request)`
+### `client.shareText(text, options?)`
 
-Encrypt and share a text message.
+Encrypts `text` locally and creates a one-time text share.
 
-**Request**
+| Option     | Type     | Default | Description           |
+|------------|----------|---------|-----------------------|
+| `ttlHours` | `number` | plan maximum | Time-to-live in hours (omitted → server uses your plan's maximum) |
 
-| Field       | Type     | Required | Description              |
-|-------------|----------|----------|--------------------------|
-| `text`      | `string` | Yes      | The secret text to share |
-| `ttl_hours` | `number` | Yes      | Time-to-live in hours    |
+**Returns `ShareTextResult`**
 
-**Response: `ShareTextResponse`**
-
-| Field          | Type      | Description                              |
-|----------------|-----------|------------------------------------------|
-| `text_id`      | `string`  | Unique ID of the shared text             |
-| `share_url`    | `string`  | One-time download link to send to recipient |
-| `expires_at`   | `string`  | Expiry datetime                          |
-| `verified_burn`| `boolean` | Whether burn-on-read is verified         |
-
-**Example**
+| Field       | Type             | Description                                                        |
+|-------------|------------------|--------------------------------------------------------------------|
+| `shareUrl`  | `string`         | One-time link (token + key in the fragment) to send to the recipient |
+| `textId`    | `string \| null` | Share ID (only when verified burn is enabled for the organization) |
+| `expiresAt` | `string`         | ISO 8601 expiry timestamp                                          |
 
 ```ts
-const result = await client.shareText({
-  text: 'db-password: hunter2',
-  ttl_hours: 48,
-});
-
-// result.share_url → send to recipient
+const { shareUrl, expiresAt } = await client.shareText('API_TOKEN=sk_live_…', { ttlHours: 48 });
 ```
 
 ---
 
-### `client.shareFile(request)`
+### `client.shareFile(data, options)`
 
-Requests a presigned upload URL for a file. Uses the returned URL with `uploadFile()` to complete the upload, then
-polls `getFileStatus()` for the share link.
+Encrypts a file locally (content, file name and MIME type) and shares it: creates an upload slot, uploads the
+ciphertext straight to storage and completes the share.
 
-> For a one-call convenience wrapper, see `shareAndUploadFile()`.
+| Argument / option     | Type                                         | Required | Description                                                   |
+|-----------------------|----------------------------------------------|----------|---------------------------------------------------------------|
+| `data`                | `Blob \| ArrayBuffer \| Uint8Array \| Buffer` | Yes      | File content                                                  |
+| `options.filename`    | `string`                                     | Yes      | Original file name (encrypted; at most 1024 UTF-8 bytes)      |
+| `options.contentType` | `string`                                     | No       | MIME type (encrypted; defaults to the Blob's type, or empty)  |
+| `options.ttlHours`    | `number`                                     | No       | Time-to-live in hours (default `8`)                           |
 
-**Request**
+**Returns `ShareFileResult`**
 
-| Field       | Type     | Required | Description                      |
-|-------------|----------|----------|----------------------------------|
-| `filename`  | `string` | Yes      | Original filename with extension |
-| `file_size` | `number` | Yes      | File size in bytes               |
-| `ttl_hours` | `number` | Yes      | Time-to-live in hours            |
-
-> Maximum file size is **80 MB** (Premium and Enterprise). Larger files are rejected with a `400` error before upload.
-
-**Response: `ShareFileResponse`**
-
-| Field              | Type     | Description                                      |
-|--------------------|----------|--------------------------------------------------|
-| `upload_url`       | `string` | Short-lived presigned S3 PUT URL                 |
-| `file_key`         | `string` | Use with `getFileStatus()` and `uploadFile()`    |
-| `poll_url`         | `string` | Convenience URL for status polling               |
-| `metadata_headers` | `object` | Required S3 headers — pass to `uploadFile()`     |
-
----
-
-### `client.uploadFile(options)`
-
-Upload a file to the presigned URL returned by `shareFile()`. Automatically attaches the required S3 metadata headers.
-
-**Options**
-
-| Field                | Type                                  | Required | Description                            |
-|----------------------|---------------------------------------|----------|----------------------------------------|
-| `file`               | `Blob \| Buffer \| ArrayBuffer`       | Yes      | File content                           |
-| `contentType`        | `string`                              | Yes      | MIME type (e.g. `application/pdf`)     |
-| `shareFileResponse`  | `ShareFileResponse`                   | Yes      | Full response from `shareFile()`       |
-
-**Example**
+| Field          | Type             | Description                                                        |
+|----------------|------------------|--------------------------------------------------------------------|
+| `shareUrl`     | `string`         | One-time link (token + key in the fragment)                        |
+| `fileId`       | `string \| null` | Share ID (only when verified burn is enabled)                      |
+| `expiresAt`    | `string`         | ISO 8601 expiry timestamp                                          |
+| `verifiedBurn` | `boolean`        | Whether verified burn is enabled for the organization             |
 
 ```ts
-import { readFileSync } from 'fs';
+import { readFile } from 'node:fs/promises';
 
-const buf = readFileSync('./report.pdf');
-
-// Step 1 – get presigned URL
-const presigned = await client.shareFile({
+const { shareUrl } = await client.shareFile(await readFile('./report.pdf'), {
   filename: 'report.pdf',
-  file_size: buf.length,
-  ttl_hours: 72,
-});
-
-// Step 2 – upload to S3
-await client.uploadFile({
-  file: buf,
   contentType: 'application/pdf',
-  shareFileResponse: presigned,
+  ttlHours: 72,
 });
-
-// Step 3 – poll for share link
-let status = await client.getFileStatus(presigned.file_key);
-while (status.status === 'processing') {
-  await new Promise((r) => setTimeout(r, 2000));
-  status = await client.getFileStatus(presigned.file_key);
-}
-
-console.log('Share URL:', status.share_url);
 ```
+
+In the browser, pass a `File` directly: `client.shareFile(file, { filename: file.name })`.
+
+The ciphertext is slightly larger than the file (16 bytes per MiB plus the encrypted name and MIME type); the server
+allows for this overhead when applying the plan's file size limit.
 
 ---
 
-### `client.getFileStatus(fileKey)`
+### `client.openShare(shareUrl)` / `openShare(shareUrl)`
 
-Poll the encryption status of an uploaded file.
+Downloads and decrypts a share link. This **consumes** the share: a second call fails with HTTP `410`. Only the
+token is sent (`POST <link origin>/api/download`), never the key or your API key. Works with
+`download.konfidant.app` and custom download domains. The standalone `openShare` export needs no client.
 
-| Argument  | Type     | Description                                    |
-|-----------|----------|------------------------------------------------|
-| `fileKey` | `string` | The `file_key` from the `shareFile()` response |
+**Returns `OpenedShare`**
 
-**Returns: `FileStatusResponse`**
-
-While processing:
-
-```ts
-{ status: 'processing', message: 'Encryption in progress' }
-```
-
-When complete:
+| Field  | Type                 | Description                                  |
+|--------|----------------------|----------------------------------------------|
+| `kind` | `'text' \| 'file'`   | Share type                                   |
+| `name` | `string`             | Original file name (empty for text)          |
+| `mime` | `string`             | MIME type (empty for text; may be empty)     |
+| `data` | `Uint8Array`         | Decrypted content                            |
+| `text` | `string \| undefined` | Decoded UTF-8 text (text shares only)        |
 
 ```ts
-{
-  status: 'complete',
-  file_id: string,
-  file_name: string,
-  share_url: string,
-  expires_at: string,
-  verified_burn: boolean,
-}
+import { openShare } from '@konfidant/sdk';
+
+const share = await openShare(link);
+if (share.kind === 'text') console.log(share.text);
+else await writeFile(share.name, share.data);
 ```
+
+Throws `KnfError` for malformed links, the wrong key, or tampered or truncated ciphertext.
 
 ---
 
 ### `client.listShares(params?)`
 
-List all shares for the authenticated organization.
+Lists shares of the authenticated organization. Only metadata is returned — no content, names or keys.
 
-**Params (all optional)**
-
-| Field    | Type                     | Description             |
-|----------|--------------------------|-------------------------|
-| `type`   | `'file' \| 'text'`       | Filter by share type    |
-| `status` | `'active' \| 'accessed'` | Filter by share status  |
-| `limit`  | `number`                 | Page size (default 50)  |
-| `offset` | `number`                 | Pagination offset       |
-
-**Response: `ListSharesResponse`**
-
-```ts
-{
-  shares: Share[],
-  pagination: {
-    total: number,
-    limit: number,
-    offset: number,
-    has_more: boolean,
-  }
-}
-```
-
-**Example**
+| Param    | Type                     | Description            |
+|----------|--------------------------|------------------------|
+| `type`   | `'file' \| 'text'`       | Filter by share type   |
+| `status` | `'active' \| 'accessed'` | Filter by share status |
+| `limit`  | `number`                 | Page size (default 50) |
+| `offset` | `number`                 | Pagination offset      |
 
 ```ts
 const { shares, pagination } = await client.listShares({ type: 'file', limit: 10 });
-
-for (const share of shares) {
-  console.log(share.file_name, share.created_by, share.expires_at);
-}
+// shares[i]: { type, file_size_bytes, created_at, expires_at, accessed_at, created_by }
 ```
 
 ---
 
-### `client.shareAndUploadFile(file, filename, contentType, ttl_hours, pollIntervalMs?, timeoutMs?)`
+### Low-level file upload
 
-Convenience method that wraps `shareFile()` → `uploadFile()` → `getFileStatus()` polling in one call.
-
-| Argument         | Type                            | Default  | Description                           |
-|------------------|---------------------------------|----------|---------------------------------------|
-| `file`           | `Blob \| Buffer \| ArrayBuffer` | —        | File content                          |
-| `filename`       | `string`                        | —        | Filename with extension               |
-| `contentType`    | `string`                        | —        | MIME type                             |
-| `ttl_hours`      | `number`                        | —        | Time-to-live in hours                 |
-| `pollIntervalMs` | `number`                        | `2000`   | How often to check status (ms)        |
-| `timeoutMs`      | `number`                        | `60000`  | Max time to wait for encryption (ms)  |
-
-**Returns**
+`shareFile()` is built from three calls you can use directly, for example to encrypt in a worker or to retry the
+upload step yourself.
 
 ```ts
-{ share_url: string, file_id: string, expires_at: string, verified_burn: boolean }
-```
+import { KonfidantClient, bytesSource, buildShareUrl, concat, encrypt, generateKey } from '@konfidant/sdk';
 
-Throws `Error` with message `Encryption timed out after Xms` if encryption does not complete within `timeoutMs`.
-
-**Example**
-
-```ts
-import { readFileSync } from 'fs';
-
-const file = readFileSync('./confidential.zip');
-
-const { share_url } = await client.shareAndUploadFile(
-  file,
-  'confidential.zip',
-  'application/zip',
-  48,
+const key = generateKey();
+const ciphertext = concat(
+  await encrypt(key, { kind: 'file', name: 'dump.sql', mime: 'application/sql' }, bytesSource(bytes)),
 );
-console.log('Ready to share:', share_url);
+
+const upload = await client.createFileUpload(ciphertext.length, 24); // POST /api/v1/files
+await client.uploadCiphertext(upload, ciphertext);                     // PUT to upload.uploadUrl
+const done = await client.completeFileUpload(upload.fileKey);          // POST /api/v1/files/{key}/complete
+
+const shareUrl = buildShareUrl(done.downloadUrl, key);
 ```
+
+| Method                                         | Description                                                                                   |
+|------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| `createFileUpload(ciphertextSize, ttlHours?)`  | Reserves an upload slot. Returns `{ uploadUrl, fileKey, uploadHeaders, uploadExpiresIn, ciphertextSize }` |
+| `uploadCiphertext(upload, ciphertext)`         | PUTs a `Uint8Array` or `Blob` with exactly `uploadHeaders`. Size must equal `ciphertextSize`; no API key is sent |
+| `completeFileUpload(fileKey)`                  | Finalizes the share. Returns `{ downloadUrl, fileId, expiresAt, verifiedBurn }`. `409 upload_incomplete` if not uploaded |
+
+---
+
+### Encryption primitives
+
+The KNF1 implementation is exported for advanced use: `generateKey`, `encodeKey`, `decodeKey`, `encrypt`,
+`encryptText`, `decrypt`, `decodeText`, `KnfDecryptor` (incremental decryption of streamed downloads),
+`bytesSource`, `blobSource`, `concat`, `ciphertextSize`, `maxFileCiphertextSize`, `maxTextCiphertextSize`,
+`encodeMetadata`, `hasValidHeader`, `buildShareUrl`, `parseShareFragment`, `KnfError` and the `KNF_*` constants.
+
+---
+
+## Encryption format (KNF1)
+
+```
+ciphertext = header (16 bytes) || sealed_chunk_0 || … || sealed_chunk_n
+header     = "KNF1" || uint32_be(chunk_size) || nonce_prefix (7 random bytes) || 0x00
+stream     = uint32_be(len(meta)) || meta || content     ; split into chunk_size pieces (default 1 MiB)
+meta       = kind (1 = text, 2 = file) || uint16_be(len(name)) || name || uint16_be(len(mime)) || mime
+nonce_i    = nonce_prefix || uint32_be(i) || last_flag (1 for the final chunk, else 0)
+sealed_i   = AES-256-GCM(key, nonce_i, chunk_i, aad = header)   ; ciphertext || 16-byte tag
+```
+
+The per-chunk nonce (STREAM construction) prevents reordering, duplication and truncation; any authentication
+failure aborts decryption. Ciphertext size: `16 + S + 16 × ceil(S / chunk_size)`, with `S = 4 + len(meta) +
+len(content)`. The SDK's test suite reproduces the official KNF1 test vectors byte-for-byte.
+
+Share link: `https://<download host>/#t=<urlencoded token>&k=<unpadded base64url key, 43 chars>`.
 
 ---
 
 ## Error handling
 
-All API errors throw `KonfidantApiError`.
+API and HTTP errors throw `KonfidantApiError`; encryption and link errors throw `KnfError`.
 
 ```ts
-import { KonfidantApiError } from '@konfidant/sdk';
+import { KonfidantApiError, KnfError } from '@konfidant/sdk';
 
 try {
-  await client.shareText({ text: 'secret', ttl_hours: 1 });
+  await client.shareText('secret', { ttlHours: 1 });
 } catch (err) {
   if (err instanceof KonfidantApiError) {
-    console.error(err.message);  // e.g. "Missing or invalid Authorization header."
-    console.error(err.status);   // e.g. 401
-    console.error(err.body);     // raw response body
+    console.error(err.status);  // e.g. 401
+    console.error(err.code);    // the response's `error` field, e.g. "upload_incomplete"
+    console.error(err.message); // the response's `message`, else `error`
+    console.error(err.body);    // raw response body
+  } else if (err instanceof KnfError) {
+    console.error(err.message); // e.g. "Decryption failed: wrong key or corrupted or truncated ciphertext"
   }
 }
 ```
 
-### Common error codes
-
-| Status | Meaning                    |
-|--------|----------------------------|
-| `400`  | Bad request / invalid body |
-| `401`  | Missing or invalid API key |
-| `403`  | Insufficient API key scope |
-| `404`  | Resource not found         |
+| Status | Meaning                                              |
+|--------|------------------------------------------------------|
+| `400`  | Bad request / invalid body / TTL above plan maximum  |
+| `401`  | Missing or invalid API key                           |
+| `403`  | Insufficient API key scope                           |
+| `404`  | Resource not found                                   |
+| `409`  | `upload_incomplete`: ciphertext not uploaded yet     |
+| `410`  | Share already opened or expired (`openShare`)        |
+| `429`  | Rate limit exceeded                                  |
 
 ---
 
-## TypeScript
+## Migrating from 0.9
 
-The SDK is written in TypeScript and ships full type definitions. No `@types/*` packages needed.
+0.10 is a breaking release: content is now encrypted client-side.
 
-```ts
-import type {
-  ShareTextRequest,
-  ShareTextResponse,
-  ShareFileRequest,
-  ShareFileResponse,
-  FileStatusResponse,
-  FileStatusComplete,
-  FileStatusProcessing,
-  ListSharesResponse,
-  ListSharesParams,
-  Share,
-} from '@konfidant/sdk';
-```
+| 0.9                                                | 0.10                                                       |
+|----------------------------------------------------|------------------------------------------------------------|
+| `shareText({ text, ttl_hours })`                   | `shareText(text, { ttlHours })`                            |
+| `shareFile({ filename, file_size, ttl_hours })` + `uploadFile()` + `getFileStatus()` polling | `shareFile(data, { filename, contentType, ttlHours })` |
+| `shareAndUploadFile(...)`                          | `shareFile(...)`                                           |
+| `share_url`, `text_id`, `file_id`, …               | `shareUrl`, `textId`, `fileId`, … (camelCase results)      |
+| `Share.file_name`                                  | removed (file names are encrypted)                         |
+| —                                                  | `openShare(shareUrl)`, low-level upload methods, KNF1 primitives |
 
 ---
 

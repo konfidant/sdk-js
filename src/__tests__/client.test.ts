@@ -1,42 +1,90 @@
-import { KonfidantClient } from '../client';
+import * as sdk from '../index';
+import { KonfidantClient, openShare } from '../client';
 import { KonfidantApiError } from '../errors';
-import type { ShareFileResponse } from '../types';
+import { KnfError, bytesSource, buildShareUrl, concat, decodeKey, decrypt, encrypt, encryptText, generateKey } from '../knf';
+import type { FileUpload } from '../types';
 
 // ---------------------------------------------------------------------------
 // fetch mock helpers
 // ---------------------------------------------------------------------------
 
-function mockFetch(status: number, body: unknown, contentType = 'application/json'): jest.Mock {
-  const mock = jest.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    headers: { get: () => contentType },
-    json: () => Promise.resolve(body),
-    text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)),
+type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
+
+interface Call {
+  url: string;
+  init: RequestInit;
+}
+
+function json(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+function binary(bytes: Uint8Array): Response {
+  return new Response(new Uint8Array(bytes), { status: 200, headers: { 'content-type': 'application/octet-stream' } });
+}
+
+/** Installs a fetch mock that answers calls in order with `handlers`. */
+function mockFetch(...handlers: Handler[]): Call[] {
+  const calls: Call[] = [];
+  global.fetch = jest.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = String(input);
+    calls.push({ url, init });
+    const handler = handlers[calls.length - 1];
+    if (!handler) throw new Error(`Unexpected fetch #${calls.length}: ${url}`);
+    return handler(url, init);
+  }) as typeof fetch;
+  return calls;
+}
+
+function headersOf(call: Call): Record<string, string> {
+  return { ...(call.init.headers as Record<string, string>) };
+}
+
+function hasHeader(call: Call, name: string): boolean {
+  return Object.keys(headersOf(call)).some((key) => key.toLowerCase() === name.toLowerCase());
+}
+
+async function bodyBytes(call: Call): Promise<Uint8Array> {
+  const body = call.init.body;
+  if (body instanceof Blob) return new Uint8Array(await body.arrayBuffer());
+  if (body instanceof Uint8Array) return body;
+  throw new Error('Unexpected body type');
+}
+
+function keyFromShareUrl(shareUrl: string): Uint8Array {
+  const k = new URLSearchParams(new URL(shareUrl).hash.slice(1)).get('k');
+  return decodeKey(k as string);
+}
+
+const DOWNLOAD_URL = 'https://download.konfidant.app/#t=hvs.CAES%2Btoken';
+const SHARE_URL_PATTERN = /^https:\/\/download\.konfidant\.app\/#t=hvs\.CAES%2Btoken&k=[A-Za-z0-9_-]{43}$/;
+const EXPIRES_AT = '2026-10-04T12:00:00.000Z';
+
+const UPLOAD_HEADERS = {
+  'Content-Type': 'application/octet-stream',
+  'x-amz-meta-organization-id': 'org_1',
+};
+
+function createFileResponse() {
+  return json(201, {
+    upload_url: 'https://r2.example.com/bucket/abc.knf?X-Amz-Signature=sig',
+    file_key: 'abc.knf',
+    upload_headers: UPLOAD_HEADERS,
+    upload_expires_in: 900,
   });
-  global.fetch = mock;
-  return mock;
 }
 
-function makeSigned(): ShareFileResponse {
-  return {
-    upload_url: 'https://s3.example.com/upload?sig=abc',
-    file_key: 'abc123.zip',
-    poll_url: 'https://www.konfidant.app/api/v1/files/abc123.zip/status',
-    metadata_headers: {
-      'x-amz-meta-user-id': 'user-1',
-      'x-amz-meta-ttl-hours': '48',
-      'x-amz-meta-organization-id': 'org-1',
-    },
-  };
+function completeResponse() {
+  return json(201, { download_url: DOWNLOAD_URL, file_id: 'file_1', expires_at: EXPIRES_AT, verified_burn: true });
 }
 
-beforeEach(() => {
-  jest.restoreAllMocks();
+const originalFetch = global.fetch;
+afterEach(() => {
+  global.fetch = originalFetch;
 });
 
 // ---------------------------------------------------------------------------
-// Constructor
+// Constructor and exports
 // ---------------------------------------------------------------------------
 
 describe('KonfidantClient constructor', () => {
@@ -44,15 +92,32 @@ describe('KonfidantClient constructor', () => {
     expect(() => new KonfidantClient({ apiKey: '' })).toThrow('apiKey is required');
   });
 
-  it('strips trailing slash from baseUrl', () => {
-    const client = new KonfidantClient({ apiKey: 'k', baseUrl: 'https://example.com/' });
-    // Access private field via cast for testing
-    expect((client as unknown as { baseUrl: string }).baseUrl).toBe('https://example.com');
+  it('strips trailing slashes from baseUrl', async () => {
+    const calls = mockFetch(() => json(200, { shares: [], pagination: {} }));
+    await new KonfidantClient({ apiKey: 'k', baseUrl: 'https://example.com//' }).listShares();
+    expect(calls[0].url).toBe('https://example.com/api/v1/shares');
   });
 
-  it('defaults to production baseUrl', () => {
-    const client = new KonfidantClient({ apiKey: 'k' });
-    expect((client as unknown as { baseUrl: string }).baseUrl).toBe('https://www.konfidant.app');
+  it('defaults to the production baseUrl', async () => {
+    const calls = mockFetch(() => json(200, { shares: [], pagination: {} }));
+    await new KonfidantClient({ apiKey: 'k' }).listShares();
+    expect(calls[0].url).toBe('https://www.konfidant.app/api/v1/shares');
+  });
+});
+
+describe('package exports', () => {
+  it('exposes the client, openShare and KNF primitives', () => {
+    for (const name of ['KonfidantClient', 'KonfidantApiError', 'openShare', 'encrypt', 'decrypt', 'generateKey',
+      'encodeKey', 'decodeKey', 'KnfDecryptor', 'buildShareUrl', 'parseShareFragment', 'ciphertextSize']) {
+      expect(sdk).toHaveProperty(name);
+    }
+  });
+
+  it('no longer has the plaintext-era methods', () => {
+    const client = new KonfidantClient({ apiKey: 'k' }) as unknown as Record<string, unknown>;
+    expect(client.shareAndUploadFile).toBeUndefined();
+    expect(client.getFileStatus).toBeUndefined();
+    expect(client.uploadFile).toBeUndefined();
   });
 });
 
@@ -63,41 +128,85 @@ describe('KonfidantClient constructor', () => {
 describe('shareText', () => {
   const client = new KonfidantClient({ apiKey: 'test-key' });
 
-  it('POST /api/v1/texts and returns response', async () => {
-    const expected = {
-      text_id: 'abc',
-      share_url: 'https://download.konfidant.app?t=tok',
-      expires_at: '2026-06-01 00:00:00',
-      verified_burn: true,
-    };
-    const fetchMock = mockFetch(201, expected);
+  it('encrypts locally, POSTs only ciphertext and builds the share URL with the key in the fragment', async () => {
+    const calls = mockFetch(() => json(201, { download_url: DOWNLOAD_URL, text_id: 'txt_1', expires_at: EXPIRES_AT }));
 
-    const result = await client.shareText({ text: 'Secret', ttl_hours: 24 });
+    const result = await client.shareText('db-password: hunter2', { ttlHours: 24 });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://www.konfidant.app/api/v1/texts');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ text: 'Secret', ttl_hours: 24 });
-    expect(init.headers).toMatchObject({ Authorization: 'Bearer test-key' });
-    expect(result).toEqual(expected);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://www.konfidant.app/api/v1/texts');
+    expect(calls[0].init.method).toBe('POST');
+    expect(headersOf(calls[0])).toEqual({ Authorization: 'Bearer test-key', 'Content-Type': 'application/json' });
+
+    const body = JSON.parse(calls[0].init.body as string) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['ciphertext', 'ttl_hours']);
+    expect(body.ttl_hours).toBe(24);
+    expect(body.ciphertext).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    expect(calls[0].init.body).not.toContain('hunter2');
+
+    expect(result.shareUrl).toMatch(SHARE_URL_PATTERN);
+    expect(result).toMatchObject({ textId: 'txt_1', expiresAt: EXPIRES_AT });
+
+    const key = keyFromShareUrl(result.shareUrl);
+    expect(calls[0].init.body).not.toContain(sdk.encodeKey(key));
+    const ciphertext = new Uint8Array(Buffer.from(body.ciphertext as string, 'base64'));
+    const decrypted = await decrypt(key, ciphertext);
+    expect(decrypted.kind).toBe('text');
+    expect(Buffer.from(decrypted.data).toString('utf8')).toBe('db-password: hunter2');
   });
 
-  it('throws KonfidantApiError on 400', async () => {
-    mockFetch(400, { error: 'Invalid JSON body' });
-    await expect(client.shareText({ text: '', ttl_hours: 0 })).rejects.toThrow(KonfidantApiError);
+  it('uses a fresh key per share and omits ttl_hours by default', async () => {
+    const response = () => json(201, { download_url: DOWNLOAD_URL, text_id: null, expires_at: EXPIRES_AT });
+    const calls = mockFetch(response, response);
+
+    const a = await client.shareText('same');
+    const b = await client.shareText('same');
+
+    expect(JSON.parse(calls[0].init.body as string)).not.toHaveProperty('ttl_hours');
+    expect(a.textId).toBeNull();
+    expect(keyFromShareUrl(a.shareUrl)).not.toEqual(keyFromShareUrl(b.shareUrl));
   });
 
-  it('KonfidantApiError carries status and body', async () => {
-    mockFetch(401, { error: 'Missing or invalid Authorization header.' });
-    let err!: KonfidantApiError;
-    try {
-      await client.shareText({ text: 'x', ttl_hours: 1 });
-    } catch (e) {
-      err = e as KonfidantApiError;
-    }
-    expect(err.status).toBe(401);
-    expect(err.message).toBe('Missing or invalid Authorization header.');
+  it('encodes large texts as standard base64', async () => {
+    const calls = mockFetch(() => json(201, { download_url: DOWNLOAD_URL, text_id: null, expires_at: EXPIRES_AT }));
+    const text = 'ü'.repeat(100_000);
+    const { shareUrl } = await client.shareText(text);
+    const body = JSON.parse(calls[0].init.body as string) as { ciphertext: string };
+    const decrypted = await decrypt(keyFromShareUrl(shareUrl), new Uint8Array(Buffer.from(body.ciphertext, 'base64')));
+    expect(Buffer.from(decrypted.data).toString('utf8')).toBe(text);
+  });
+
+  it('refuses a download_url without a #t= fragment so the key never lands in the query string', async () => {
+    mockFetch(() => json(201, { download_url: 'https://download.konfidant.app/?t=x', text_id: null, expires_at: '' }));
+    await expect(client.shareText('secret')).rejects.toThrow(KnfError);
+  });
+
+  it('throws KonfidantApiError with status, code, message and body', async () => {
+    mockFetch(() => json(400, { error: 'invalid_ttl', message: 'ttl_hours exceeds plan maximum' }));
+    const err = (await client.shareText('x', { ttlHours: 999 }).catch((e: unknown) => e)) as KonfidantApiError;
+    expect(err).toBeInstanceOf(KonfidantApiError);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe('invalid_ttl');
+    expect(err.message).toBe('ttl_hours exceeds plan maximum');
+    expect(err.body).toEqual({ error: 'invalid_ttl', message: 'ttl_hours exceeds plan maximum' });
+  });
+
+  it('uses the error field as message when no message is given', async () => {
+    mockFetch(() => json(401, { error: 'Missing or invalid Authorization header.' }));
+    await expect(client.shareText('x')).rejects.toMatchObject({
+      status: 401,
+      message: 'Missing or invalid Authorization header.',
+    });
+  });
+
+  it('handles non-JSON error bodies', async () => {
+    mockFetch(() => new Response('Bad Gateway', { status: 502, headers: { 'content-type': 'text/plain' } }));
+    await expect(client.shareText('x')).rejects.toMatchObject({
+      status: 502,
+      code: undefined,
+      message: 'Request failed: HTTP 502',
+      body: 'Bad Gateway',
+    });
   });
 });
 
@@ -107,70 +216,195 @@ describe('shareText', () => {
 
 describe('shareFile', () => {
   const client = new KonfidantClient({ apiKey: 'test-key' });
+  const content = Uint8Array.from({ length: 3 * 1024 * 1024 + 123 }, (_, i) => (i * 7) % 256);
 
-  it('POST /api/v1/files and returns presigned response', async () => {
-    const expected = makeSigned();
-    const fetchMock = mockFetch(202, expected);
+  async function runShare(data: sdk.FileData, options: sdk.ShareFileOptions) {
+    const calls = mockFetch(createFileResponse, () => new Response(null, { status: 200 }), completeResponse);
+    const result = await client.shareFile(data, options);
+    return { calls, result };
+  }
 
-    const result = await client.shareFile({ filename: 'doc.pdf', file_size: 1024, ttl_hours: 48 });
+  it('creates the upload, PUTs the ciphertext without the API key and completes it', async () => {
+    const { calls, result } = await runShare(Buffer.from(content), {
+      filename: 'Quarterly report – Q3.pdf',
+      contentType: 'application/pdf',
+      ttlHours: 48,
+    });
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://www.konfidant.app/api/v1/files');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ filename: 'doc.pdf', file_size: 1024, ttl_hours: 48 });
-    expect(result).toEqual(expected);
+    expect(calls.map((c) => [c.init.method, c.url])).toEqual([
+      ['POST', 'https://www.konfidant.app/api/v1/files'],
+      ['PUT', 'https://r2.example.com/bucket/abc.knf?X-Amz-Signature=sig'],
+      ['POST', 'https://www.konfidant.app/api/v1/files/abc.knf/complete'],
+    ]);
+
+    // 1. create: only size + ttl, no plaintext metadata
+    const createBody = JSON.parse(calls[0].init.body as string) as Record<string, unknown>;
+    expect(Object.keys(createBody).sort()).toEqual(['ciphertext_size', 'ttl_hours']);
+    expect(createBody.ttl_hours).toBe(48);
+    expect(headersOf(calls[0]).Authorization).toBe('Bearer test-key');
+
+    // 2. upload: exactly upload_headers, no Authorization, size matches
+    expect(headersOf(calls[1])).toEqual(UPLOAD_HEADERS);
+    expect(hasHeader(calls[1], 'authorization')).toBe(false);
+    const uploaded = await bodyBytes(calls[1]);
+    expect(uploaded.length).toBe(createBody.ciphertext_size);
+    expect(sdk.hasValidHeader(uploaded)).toBe(true);
+
+    // 3. complete: authenticated POST without a body
+    expect(headersOf(calls[2])).toEqual({ Authorization: 'Bearer test-key' });
+    expect(calls[2].init.body).toBeUndefined();
+
+    expect(result).toEqual({
+      shareUrl: expect.stringMatching(SHARE_URL_PATTERN),
+      fileId: 'file_1',
+      expiresAt: EXPIRES_AT,
+      verifiedBurn: true,
+    });
+
+    const decrypted = await decrypt(keyFromShareUrl(result.shareUrl), uploaded);
+    expect(decrypted).toMatchObject({ kind: 'file', name: 'Quarterly report – Q3.pdf', mime: 'application/pdf' });
+    // Buffer.equals: Jest's toEqual is very slow on multi-megabyte typed arrays.
+    expect(Buffer.from(decrypted.data).equals(content)).toBe(true);
   });
 
-  it('throws on 401', async () => {
-    mockFetch(401, { error: 'Unauthorized' });
-    await expect(client.shareFile({ filename: 'x', file_size: 1, ttl_hours: 1 })).rejects.toThrow(
-      KonfidantApiError,
+  it('accepts a Blob and takes the MIME type from it', async () => {
+    const { calls, result } = await runShare(new Blob([content.subarray(0, 5000)], { type: 'image/png' }), {
+      filename: 'a.png',
+    });
+    expect(JSON.parse(calls[0].init.body as string)).not.toHaveProperty('ttl_hours');
+    const decrypted = await decrypt(keyFromShareUrl(result.shareUrl), await bodyBytes(calls[1]));
+    expect(decrypted).toMatchObject({ name: 'a.png', mime: 'image/png' });
+    expect(decrypted.data).toEqual(content.subarray(0, 5000));
+  });
+
+  it('accepts an ArrayBuffer and empty files', async () => {
+    const { calls, result } = await runShare(new ArrayBuffer(0), { filename: 'empty.txt' });
+    const decrypted = await decrypt(keyFromShareUrl(result.shareUrl), await bodyBytes(calls[1]));
+    expect(decrypted).toMatchObject({ kind: 'file', name: 'empty.txt', mime: '' });
+    expect(decrypted.data.length).toBe(0);
+  });
+
+  it('requires a filename', async () => {
+    await expect(client.shareFile(new Uint8Array(1), { filename: '' })).rejects.toThrow('filename is required');
+  });
+
+  it('surfaces 409 upload_incomplete from complete', async () => {
+    mockFetch(createFileResponse, () => new Response(null, { status: 200 }), () =>
+      json(409, { error: 'upload_incomplete' }),
     );
+    await expect(client.shareFile(new Uint8Array(10), { filename: 'f' })).rejects.toMatchObject({
+      name: 'KonfidantApiError',
+      status: 409,
+      code: 'upload_incomplete',
+    });
+  });
+
+  it('throws when the storage upload fails and does not complete', async () => {
+    const calls = mockFetch(createFileResponse, () =>
+      new Response('<Error><Code>SignatureDoesNotMatch</Code></Error>', {
+        status: 403,
+        headers: { 'content-type': 'application/xml' },
+      }),
+    );
+    await expect(client.shareFile(new Uint8Array(10), { filename: 'f' })).rejects.toMatchObject({
+      status: 403,
+      message: 'Upload failed: HTTP 403',
+    });
+    expect(calls).toHaveLength(2);
   });
 });
 
 // ---------------------------------------------------------------------------
-// getFileStatus
+// Low-level upload API
 // ---------------------------------------------------------------------------
 
-describe('getFileStatus', () => {
+describe('createFileUpload', () => {
   const client = new KonfidantClient({ apiKey: 'test-key' });
 
-  it('returns processing status (202)', async () => {
-    const expected = { status: 'processing', message: 'Encryption in progress' };
-    const fetchMock = mockFetch(202, expected);
-
-    const result = await client.getFileStatus('abc123.zip');
-
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toBe('https://www.konfidant.app/api/v1/files/abc123.zip/status');
-    expect(result).toEqual(expected);
+  it('maps the response to camelCase and remembers the size', async () => {
+    const calls = mockFetch(createFileResponse);
+    const upload = await client.createFileUpload(1234, 12);
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ ciphertext_size: 1234, ttl_hours: 12 });
+    expect(upload).toEqual({
+      uploadUrl: 'https://r2.example.com/bucket/abc.knf?X-Amz-Signature=sig',
+      fileKey: 'abc.knf',
+      uploadHeaders: UPLOAD_HEADERS,
+      uploadExpiresIn: 900,
+      ciphertextSize: 1234,
+    });
   });
 
-  it('returns complete status (200)', async () => {
-    const expected = {
-      status: 'complete',
-      file_id: 'file-1',
-      file_name: 'doc.pdf',
-      share_url: 'https://download.konfidant.app?t=tok',
-      expires_at: '2026-06-01 00:00:00',
-      verified_burn: true,
-    };
-    mockFetch(200, expected);
-    const result = await client.getFileStatus('abc123.zip');
-    expect(result).toEqual(expected);
+  it('rejects invalid sizes without calling the API', async () => {
+    const calls = mockFetch();
+    await expect(client.createFileUpload(0, 1)).rejects.toThrow(RangeError);
+    await expect(client.createFileUpload(1.5, 1)).rejects.toThrow(RangeError);
+    expect(calls).toHaveLength(0);
   });
 
-  it('URL-encodes fileKey', async () => {
-    const fetchMock = mockFetch(200, { status: 'complete', file_id: 'x', file_name: 'x', share_url: 'x', expires_at: 'x', verified_burn: false });
-    await client.getFileStatus('has spaces.zip');
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain('has%20spaces.zip');
+  it('throws KonfidantApiError on 413', async () => {
+    mockFetch(() => json(413, { error: 'file_too_large' }));
+    await expect(client.createFileUpload(10, 1)).rejects.toMatchObject({ status: 413, code: 'file_too_large' });
+  });
+});
+
+describe('uploadCiphertext', () => {
+  const client = new KonfidantClient({ apiKey: 'test-key' });
+  const upload = (headers: Record<string, string> = UPLOAD_HEADERS): FileUpload => ({
+    uploadUrl: 'https://r2.example.com/u',
+    fileKey: 'k',
+    uploadHeaders: headers,
+    uploadExpiresIn: 60,
+    ciphertextSize: 4,
   });
 
-  it('throws KonfidantApiError on 404', async () => {
-    mockFetch(404, { error: 'File not found' });
-    await expect(client.getFileStatus('nope')).rejects.toThrow(KonfidantApiError);
+  it('PUTs bytes with the upload headers only', async () => {
+    const calls = mockFetch(() => new Response(null, { status: 200 }));
+    await client.uploadCiphertext(upload(), new Uint8Array([1, 2, 3, 4]));
+    expect(calls[0].init.method).toBe('PUT');
+    expect(headersOf(calls[0])).toEqual(UPLOAD_HEADERS);
+    expect(await bodyBytes(calls[0])).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  it('leaves Content-Length to fetch when it matches the body', async () => {
+    const calls = mockFetch(() => new Response(null, { status: 200 }));
+    await client.uploadCiphertext(upload({ ...UPLOAD_HEADERS, 'Content-Length': '4' }), new Uint8Array(4));
+    expect(headersOf(calls[0])).toEqual(UPLOAD_HEADERS);
+  });
+
+  it('rejects a body whose size differs from the slot', async () => {
+    const calls = mockFetch();
+    await expect(client.uploadCiphertext(upload(), new Uint8Array(5))).rejects.toThrow('expects 4');
+    await expect(
+      client.uploadCiphertext(upload({ 'content-length': '5' }), new Uint8Array(4)),
+    ).rejects.toThrow('Content-Length');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('completeFileUpload', () => {
+  const client = new KonfidantClient({ apiKey: 'test-key' });
+
+  it('URL-encodes the file key and maps the response', async () => {
+    const calls = mockFetch(completeResponse);
+    const result = await client.completeFileUpload('org 1/abc.knf');
+    expect(calls[0].url).toBe('https://www.konfidant.app/api/v1/files/org%201%2Fabc.knf/complete');
+    expect(calls[0].init.method).toBe('POST');
+    expect(result).toEqual({ downloadUrl: DOWNLOAD_URL, fileId: 'file_1', expiresAt: EXPIRES_AT, verifiedBurn: true });
+  });
+
+  it('throws 409 upload_incomplete when the object is missing', async () => {
+    mockFetch(() => json(409, { error: 'upload_incomplete' }));
+    const err = (await client.completeFileUpload('abc.knf').catch((e: unknown) => e)) as KonfidantApiError;
+    expect(err).toBeInstanceOf(KonfidantApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('upload_incomplete');
+  });
+
+  it('can be combined with buildShareUrl', async () => {
+    mockFetch(completeResponse);
+    const key = generateKey();
+    const { downloadUrl } = await client.completeFileUpload('abc.knf');
+    expect(buildShareUrl(downloadUrl, key)).toMatch(SHARE_URL_PATTERN);
   });
 });
 
@@ -180,181 +414,123 @@ describe('getFileStatus', () => {
 
 describe('listShares', () => {
   const client = new KonfidantClient({ apiKey: 'test-key' });
-  const sharesResponse = {
-    shares: [],
-    pagination: { total: 0, limit: 50, offset: 0, has_more: false },
+  const response = {
+    shares: [
+      {
+        type: 'file',
+        file_size_bytes: 2048,
+        created_at: '2026-10-01T00:00:00.000Z',
+        expires_at: EXPIRES_AT,
+        accessed_at: null,
+        created_by: 'dev@example.com',
+      },
+    ],
+    pagination: { total: 1, limit: 10, offset: 5, has_more: false },
   };
 
-  it('GET /api/v1/shares with no params', async () => {
-    const fetchMock = mockFetch(200, sharesResponse);
+  it('GETs /api/v1/shares with filters', async () => {
+    const calls = mockFetch(() => json(200, response));
+    const result = await client.listShares({ type: 'file', status: 'active', limit: 10, offset: 5 });
+    expect(calls[0].url).toBe('https://www.konfidant.app/api/v1/shares?type=file&status=active&limit=10&offset=5');
+    expect(calls[0].init.method).toBe('GET');
+    expect(calls[0].init.body).toBeUndefined();
+    expect(headersOf(calls[0])).toEqual({ Authorization: 'Bearer test-key' });
+    expect(result).toEqual(response);
+  });
+
+  it('omits the query string without params', async () => {
+    const calls = mockFetch(() => json(200, response));
     await client.listShares();
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toBe('https://www.konfidant.app/api/v1/shares');
+    expect(calls[0].url).toBe('https://www.konfidant.app/api/v1/shares');
   });
 
-  it('appends query params', async () => {
-    const fetchMock = mockFetch(200, sharesResponse);
-    await client.listShares({ type: 'file', status: 'active', limit: 10, offset: 20 });
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain('type=file');
-    expect(url).toContain('status=active');
-    expect(url).toContain('limit=10');
-    expect(url).toContain('offset=20');
-  });
-
-  it('returns shares and pagination', async () => {
-    const body = {
-      shares: [
-        {
-          type: 'file',
-          file_name: 'doc.pdf',
-          file_size_bytes: 1024,
-          created_at: '2026-05-01T00:00:00.000Z',
-          expires_at: '2026-05-08T00:00:00.000Z',
-          accessed_at: null,
-          created_by: 'user@example.com',
-        },
-      ],
-      pagination: { total: 1, limit: 50, offset: 0, has_more: false },
-    };
-    mockFetch(200, body);
-    const result = await client.listShares();
-    expect(result.shares).toHaveLength(1);
-    expect(result.pagination.total).toBe(1);
-  });
-
-  it('throws KonfidantApiError on 403', async () => {
-    mockFetch(403, {
-      error: 'Insufficient permissions',
-      required_scope: 'shares:list',
-      available_scopes: ['files:create'],
-    });
-    await expect(client.listShares()).rejects.toThrow(KonfidantApiError);
+  it('throws on 403', async () => {
+    mockFetch(() => json(403, { error: 'Insufficient scope', required_scope: 'shares:read' }));
+    await expect(client.listShares()).rejects.toMatchObject({ status: 403, code: 'Insufficient scope' });
   });
 });
 
 // ---------------------------------------------------------------------------
-// uploadFile
+// openShare
 // ---------------------------------------------------------------------------
 
-describe('uploadFile', () => {
+describe('openShare', () => {
   const client = new KonfidantClient({ apiKey: 'test-key' });
 
-  it('PUT to upload_url with correct headers and body', async () => {
-    const fetchMock = mockFetch(200, '', 'text/plain');
-    const fileContent = Buffer.from('hello');
-    const signed = makeSigned();
+  it('POSTs only the token to the link origin, without the API key, and decrypts text', async () => {
+    const key = generateKey();
+    const ciphertext = await encryptText(key, 'postgres://user:s3cret@db:5432');
+    const calls = mockFetch(() => binary(ciphertext));
 
-    await client.uploadFile({ file: fileContent, contentType: 'text/plain', shareFileResponse: signed });
+    const shareUrl = buildShareUrl(DOWNLOAD_URL, key);
+    const opened = await client.openShare(shareUrl);
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(signed.upload_url);
-    expect(init.method).toBe('PUT');
-    expect(init.body).toBe(fileContent);
-    expect(init.headers).toMatchObject({
-      'Content-Type': 'text/plain',
-      'x-amz-meta-organization-id': 'org-1',
-      'x-amz-meta-ttl-hours': '48',
-      'x-amz-meta-user-id': 'user-1',
-    });
+    expect(calls[0].url).toBe('https://download.konfidant.app/api/download');
+    expect(calls[0].init.method).toBe('POST');
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ t: 'hvs.CAES+token' });
+    expect(hasHeader(calls[0], 'authorization')).toBe(false);
+    expect(calls[0].init.body).not.toContain(sdk.encodeKey(key));
+    expect(opened).toMatchObject({ kind: 'text', name: '', mime: '', text: 'postgres://user:s3cret@db:5432' });
   });
 
-  it('does NOT send Konfidant Authorization header to S3', async () => {
-    const fetchMock = mockFetch(200, '', 'text/plain');
-    await client.uploadFile({
-      file: Buffer.from('x'),
-      contentType: 'text/plain',
-      shareFileResponse: makeSigned(),
-    });
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const headers = init.headers as Record<string, string>;
-    expect(headers['Authorization']).toBeUndefined();
+  it('decrypts file shares from a custom domain without needing a client', async () => {
+    const key = generateKey();
+    const content = Uint8Array.from({ length: 10_000 }, (_, i) => i % 251);
+    const ciphertext = concat(
+      await encrypt(key, { kind: 'file', name: 'report.pdf', mime: 'application/pdf' }, bytesSource(content)),
+    );
+    const calls = mockFetch(() => binary(ciphertext));
+
+    const opened = await openShare(buildShareUrl('https://share.example.com/#t=tok', key));
+
+    expect(calls[0].url).toBe('https://share.example.com/api/download');
+    expect(opened.kind).toBe('file');
+    expect(opened.name).toBe('report.pdf');
+    expect(opened.mime).toBe('application/pdf');
+    expect(opened.data).toEqual(content);
+    expect(opened.text).toBeUndefined();
   });
 
-  it('throws KonfidantApiError when S3 returns error', async () => {
-    mockFetch(403, 'AccessDenied', 'application/xml');
-    await expect(
-      client.uploadFile({ file: Buffer.from('x'), contentType: 'text/plain', shareFileResponse: makeSigned() }),
-    ).rejects.toThrow(KonfidantApiError);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// shareAndUploadFile (convenience)
-// ---------------------------------------------------------------------------
-
-describe('shareAndUploadFile', () => {
-  const client = new KonfidantClient({ apiKey: 'test-key' });
-
-  it('calls shareFile → uploadFile → polls getFileStatus until complete', async () => {
-    const signed = makeSigned();
-    const processing = { status: 'processing', message: 'Encryption in progress' };
-    const complete = {
-      status: 'complete',
-      file_id: 'file-1',
-      file_name: 'doc.pdf',
-      share_url: 'https://download.konfidant.app?t=tok',
-      expires_at: '2026-06-01 00:00:00',
-      verified_burn: true,
-    };
-
-    const fetchMock = jest.fn()
-      // shareFile → 202
-      .mockResolvedValueOnce({ ok: true, status: 202, headers: { get: () => 'application/json' }, json: () => Promise.resolve(signed) })
-      // uploadFile → 200
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'text/plain' }, text: () => Promise.resolve('') })
-      // getFileStatus → 202 processing
-      .mockResolvedValueOnce({ ok: true, status: 202, headers: { get: () => 'application/json' }, json: () => Promise.resolve(processing) })
-      // getFileStatus → 200 complete
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: () => Promise.resolve(complete) });
-
-    global.fetch = fetchMock;
-    jest.useFakeTimers();
-
-    const resultPromise = client.shareAndUploadFile(Buffer.from('data'), 'doc.pdf', 'application/pdf', 48, 100, 5000);
-    // advance past each poll interval
-    await jest.runAllTimersAsync();
-    const result = await resultPromise;
-
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(result.share_url).toBe(complete.share_url);
-    expect(result.file_id).toBe(complete.file_id);
-
-    jest.useRealTimers();
+  it('round-trips with shareText', async () => {
+    const calls = mockFetch(() => json(201, { download_url: DOWNLOAD_URL, text_id: null, expires_at: EXPIRES_AT }));
+    const { shareUrl } = await client.shareText('round trip ✓');
+    const uploaded = new Uint8Array(
+      Buffer.from((JSON.parse(calls[0].init.body as string) as { ciphertext: string }).ciphertext, 'base64'),
+    );
+    mockFetch(() => binary(uploaded));
+    expect((await openShare(shareUrl)).text).toBe('round trip ✓');
   });
 
-  it('throws on timeout if encryption never completes', async () => {
-    const signed = makeSigned();
-    const processing = { status: 'processing', message: 'Encryption in progress' };
-
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce({ ok: true, status: 202, headers: { get: () => 'application/json' }, json: () => Promise.resolve(signed) })
-      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => 'text/plain' }, text: () => Promise.resolve('') })
-      .mockResolvedValue({ ok: true, status: 202, headers: { get: () => 'application/json' }, json: () => Promise.resolve(processing) });
-
-    jest.useFakeTimers();
-
-    const resultPromise = client.shareAndUploadFile(Buffer.from('data'), 'doc.pdf', 'application/pdf', 48, 100, 300);
-    // Attach rejection handler BEFORE advancing timers to avoid unhandled rejection warning
-    const assertion = expect(resultPromise).rejects.toThrow('Encryption timed out');
-    await jest.runAllTimersAsync();
-    await assertion;
-
-    jest.useRealTimers();
+  it('throws KonfidantApiError 410 when the share was already used or expired', async () => {
+    mockFetch(() => json(410, { error: 'gone', message: 'This link has already been used or has expired.' }));
+    const err = (await openShare(buildShareUrl(DOWNLOAD_URL, generateKey())).catch((e: unknown) => e)) as
+      KonfidantApiError;
+    expect(err).toBeInstanceOf(KonfidantApiError);
+    expect(err.status).toBe(410);
+    expect(err.message).toBe('This link has already been used or has expired.');
   });
-});
 
-// ---------------------------------------------------------------------------
-// KonfidantApiError
-// ---------------------------------------------------------------------------
+  it('rejects links without token or key before any request', async () => {
+    const calls = mockFetch();
+    await expect(openShare('https://download.konfidant.app/#t=tok')).rejects.toThrow(KnfError);
+    await expect(openShare('https://download.konfidant.app/#k=abc')).rejects.toThrow(KnfError);
+    await expect(openShare('https://download.konfidant.app/?t=tok&k=x')).rejects.toThrow(KnfError);
+    await expect(openShare('ftp://download.konfidant.app/#t=a&k=b')).rejects.toThrow('http(s)');
+    await expect(openShare('not a url')).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
 
-describe('KonfidantApiError', () => {
-  it('has correct name, status and body', () => {
-    const err = new KonfidantApiError('Unauthorized', 401, { error: 'Unauthorized' });
-    expect(err.name).toBe('KonfidantApiError');
-    expect(err.status).toBe(401);
-    expect(err.body).toEqual({ error: 'Unauthorized' });
-    expect(err instanceof Error).toBe(true);
+  it('fails on the wrong key', async () => {
+    const ciphertext = await encryptText(generateKey(), 'secret');
+    mockFetch(() => binary(ciphertext));
+    await expect(openShare(buildShareUrl(DOWNLOAD_URL, generateKey()))).rejects.toThrow('Decryption failed');
+  });
+
+  it('fails on tampered ciphertext', async () => {
+    const key = generateKey();
+    const ciphertext = await encryptText(key, 'secret');
+    ciphertext[ciphertext.length - 1] ^= 0x01;
+    mockFetch(() => binary(ciphertext));
+    await expect(openShare(buildShareUrl(DOWNLOAD_URL, key))).rejects.toThrow('Decryption failed');
   });
 });

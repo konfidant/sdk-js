@@ -1,69 +1,123 @@
+import type { KnfKind } from './knf';
+
 export interface KonfidantClientOptions {
   apiKey: string;
+  /** API base URL. Default: `https://www.konfidant.app`. */
   baseUrl?: string;
 }
 
-// POST /api/v1/texts
-export interface ShareTextRequest {
-  text: string;
-  ttl_hours: number;
+// ---------------------------------------------------------------------------
+// Public method options and results
+// ---------------------------------------------------------------------------
+
+export interface ShareTextOptions {
+  /** Time-to-live in hours. Default: 8 (the Free tier maximum). */
+  ttlHours?: number;
 }
 
-export interface ShareTextResponse {
-  text_id: string;
-  share_url: string;
-  expires_at: string;
-  verified_burn: boolean;
+export interface ShareTextResult {
+  /** One-time link for the recipient. Carries the token and the decryption key in the URL fragment. */
+  shareUrl: string;
+  /** Present only when the organization has verified burn enabled. */
+  textId: string | null;
+  /** ISO 8601 expiry timestamp. */
+  expiresAt: string;
 }
 
-// POST /api/v1/files
-export interface ShareFileRequest {
+/** File content accepted by `shareFile()`. Node.js `Buffer` is a `Uint8Array`. */
+export type FileData = Blob | ArrayBuffer | Uint8Array;
+
+export interface ShareFileOptions {
+  /** Original file name, encrypted together with the content (at most 1024 UTF-8 bytes). */
   filename: string;
-  file_size: number;
-  ttl_hours: number;
+  /** MIME type, encrypted together with the content (at most 255 UTF-8 bytes). Default: the Blob's type, or empty. */
+  contentType?: string;
+  /** Time-to-live in hours. Default: 8 (the Free tier maximum). */
+  ttlHours?: number;
 }
 
-export interface FileMetadataHeaders {
-  'x-amz-meta-user-id': string;
-  'x-amz-meta-ttl-hours': string;
-  'x-amz-meta-organization-id': string;
+export interface ShareFileResult {
+  /** One-time link for the recipient. Carries the token and the decryption key in the URL fragment. */
+  shareUrl: string;
+  /** Present only when the organization has verified burn enabled. */
+  fileId: string | null;
+  /** ISO 8601 expiry timestamp. */
+  expiresAt: string;
+  verifiedBurn: boolean;
 }
 
-export interface ShareFileResponse {
+/** Upload slot returned by `createFileUpload()`. */
+export interface FileUpload {
+  /** Presigned PUT URL for the KNF1 ciphertext. The API key is never sent to it. */
+  uploadUrl: string;
+  fileKey: string;
+  /** Headers that must be sent verbatim with the PUT. */
+  uploadHeaders: Record<string, string>;
+  /** Seconds until `uploadUrl` expires. */
+  uploadExpiresIn: number;
+  /** Exact ciphertext byte length the upload slot was created for. */
+  ciphertextSize: number;
+}
+
+export interface CompleteFileUploadResult {
+  /** Server-issued download URL (`https://<host>/#t=<token>`), without the decryption key. */
+  downloadUrl: string;
+  /** Present only when the organization has verified burn enabled. */
+  fileId: string | null;
+  /** ISO 8601 expiry timestamp. */
+  expiresAt: string;
+  verifiedBurn: boolean;
+}
+
+export interface OpenedShare {
+  kind: KnfKind;
+  /** Original file name (empty for text shares). */
+  name: string;
+  /** MIME type (empty for text shares; may be empty for files). */
+  mime: string;
+  /** Decrypted content. */
+  data: Uint8Array;
+  /** Decoded UTF-8 text (text shares only). */
+  text?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Raw API payloads (snake_case, as sent over the wire)
+// ---------------------------------------------------------------------------
+
+/** POST /api/v1/texts response. */
+export interface ApiShareTextResponse {
+  download_url: string;
+  text_id: string | null;
+  expires_at: string;
+}
+
+/** POST /api/v1/files response. */
+export interface ApiCreateFileResponse {
   upload_url: string;
   file_key: string;
-  metadata_headers: FileMetadataHeaders;
-  poll_url: string;
+  upload_headers: Record<string, string>;
+  upload_expires_in: number;
 }
 
-// GET /api/v1/files/{fileKey}/status
-export type EncryptionStatus = 'processing' | 'complete';
-
-export interface FileStatusProcessing {
-  status: 'processing';
-  message: string;
-}
-
-export interface FileStatusComplete {
-  status: 'complete';
-  file_id: string;
-  file_name: string;
-  share_url: string;
+/** POST /api/v1/files/{file_key}/complete response. */
+export interface ApiCompleteFileResponse {
+  download_url: string;
+  file_id: string | null;
   expires_at: string;
   verified_burn: boolean;
 }
-
-export type FileStatusResponse = FileStatusProcessing | FileStatusComplete;
 
 // GET /api/v1/shares
 export interface Share {
   type: 'file' | 'text';
-  file_name: string;
-  file_size_bytes: number;
+  /** Ciphertext size for files; null for texts. */
+  file_size_bytes: number | null;
   created_at: string;
   expires_at: string;
   accessed_at: string | null;
-  created_by: string;
+  /** Creator email; null if the user was deleted. */
+  created_by: string | null;
 }
 
 export interface Pagination {
@@ -85,15 +139,10 @@ export interface ListSharesParams {
   offset?: number;
 }
 
-// uploadFile helper
-export interface UploadFileOptions {
-  file: Blob | Buffer | ArrayBuffer;
-  contentType: string;
-  shareFileResponse: ShareFileResponse;
-}
-
-export interface KonfidantError {
+/** Error body returned by the API. */
+export interface KonfidantErrorBody {
   error: string;
+  message?: string;
   required_scope?: string;
   available_scopes?: string[];
 }

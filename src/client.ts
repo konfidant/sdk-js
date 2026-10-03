@@ -1,17 +1,126 @@
 import { KonfidantApiError } from './errors';
+import {
+  KnfError,
+  blobSource,
+  buildShareUrl,
+  bytesSource,
+  decodeText,
+  decrypt,
+  encrypt,
+  encryptText,
+  generateKey,
+  parseShareFragment,
+} from './knf';
+import type { KnfSource } from './knf';
 import type {
+  ApiCompleteFileResponse,
+  ApiCreateFileResponse,
+  ApiShareTextResponse,
+  CompleteFileUploadResult,
+  FileData,
+  FileUpload,
   KonfidantClientOptions,
-  ShareTextRequest,
-  ShareTextResponse,
-  ShareFileRequest,
-  ShareFileResponse,
-  FileStatusResponse,
-  ListSharesResponse,
   ListSharesParams,
-  UploadFileOptions,
+  ListSharesResponse,
+  OpenedShare,
+  ShareFileOptions,
+  ShareFileResult,
+  ShareTextOptions,
+  ShareTextResult,
 } from './types';
 
-const DEFAULT_BASE_URL = 'https://www.konfidant.app';
+export const DEFAULT_BASE_URL = 'https://www.konfidant.app';
+/** Default share lifetime: the Free tier maximum, so it is accepted on every plan. */
+
+/** Standard base64 (with padding) without relying on Node's Buffer, so the SDK also runs in browsers. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const step = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += step) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + step));
+  }
+  return btoa(binary);
+}
+
+function isBlob(value: unknown): value is Blob {
+  return typeof Blob !== 'undefined' && value instanceof Blob;
+}
+
+function toSource(data: FileData): KnfSource {
+  if (isBlob(data)) return blobSource(data);
+  if (data instanceof Uint8Array) return bytesSource(data);
+  if (data instanceof ArrayBuffer) return bytesSource(new Uint8Array(data));
+  throw new TypeError('data must be a Blob, ArrayBuffer, Uint8Array or Buffer');
+}
+
+/**
+ * Appends the key to the server-issued download URL. Refuses URLs without a `#t=` fragment: appending the key
+ * there would put it in the query string, which is sent to the server.
+ */
+function shareUrlFor(downloadUrl: string, key: Uint8Array): string {
+  if (!new URL(downloadUrl).hash.startsWith('#t=')) {
+    throw new KnfError('Unexpected download_url from the API: missing #t= fragment');
+  }
+  return buildShareUrl(downloadUrl, key);
+}
+
+async function readBody(res: Response): Promise<unknown> {
+  const contentType = res.headers.get('content-type') ?? '';
+  const text = await res.text();
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+async function apiError(res: Response, fallback: string): Promise<KonfidantApiError> {
+  const body = await readBody(res);
+  let code: string | undefined;
+  let message = `${fallback}: HTTP ${res.status}`;
+  if (typeof body === 'object' && body !== null) {
+    const record = body as Record<string, unknown>;
+    if (typeof record.error === 'string') {
+      code = record.error;
+      message = record.error;
+    }
+    if (typeof record.message === 'string') message = record.message;
+  }
+  return new KonfidantApiError(message, res.status, body, code);
+}
+
+/**
+ * Downloads and decrypts a share. The single-use token is consumed: a second call fails with HTTP 410.
+ * Needs no API key — the link alone grants access. Only the token is sent to the server, never the key.
+ */
+export async function openShare(shareUrl: string): Promise<OpenedShare> {
+  const url = new URL(shareUrl);
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new KnfError('Share link must be an http(s) URL');
+  }
+  const fragment = parseShareFragment(url.hash);
+  if (!fragment) throw new KnfError('Invalid share link: the fragment must contain #t=<token>&k=<key>');
+
+  const res = await fetch(`${url.origin}/api/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ t: fragment.token }),
+  });
+  if (!res.ok) throw await apiError(res, 'Download failed');
+
+  const decrypted = await decrypt(fragment.key, new Uint8Array(await res.arrayBuffer()));
+  const opened: OpenedShare = {
+    kind: decrypted.kind,
+    name: decrypted.name,
+    mime: decrypted.mime,
+    data: decrypted.data,
+  };
+  if (decrypted.kind === 'text') opened.text = decodeText(decrypted);
+  return opened;
+}
 
 export class KonfidantClient {
   private readonly apiKey: string;
@@ -22,93 +131,123 @@ export class KonfidantClient {
       throw new Error('apiKey is required');
     }
     this.apiKey = options.apiKey;
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
   }
 
-  private get authHeaders(): Record<string, string> {
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}` };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!res.ok) throw await apiError(res, 'Request failed');
+    return (await readBody(res)) as T;
+  }
+
+  /**
+   * Encrypts `text` locally and shares it. Konfidant only receives the ciphertext; the key is placed in the
+   * returned link's fragment.
+   */
+  async shareText(text: string, options: ShareTextOptions = {}): Promise<ShareTextResult> {
+    const key = generateKey();
+    const ciphertext = await encryptText(key, text);
+    const res = await this.request<ApiShareTextResponse>('POST', '/api/v1/texts', {
+      ciphertext: toBase64(ciphertext),
+      ...(options.ttlHours !== undefined ? { ttl_hours: options.ttlHours } : {}),
+    });
+    return { shareUrl: shareUrlFor(res.download_url, key), textId: res.text_id, expiresAt: res.expires_at };
+  }
+
+  /**
+   * Encrypts a file locally (content, file name and MIME type) and shares it:
+   * `createFileUpload()` → `uploadCiphertext()` → `completeFileUpload()`.
+   */
+  async shareFile(data: FileData, options: ShareFileOptions): Promise<ShareFileResult> {
+    if (!options?.filename) throw new Error('filename is required');
+    const key = generateKey();
+    const mime = options.contentType ?? (isBlob(data) ? data.type : '');
+    const parts = await encrypt(key, { kind: 'file', name: options.filename, mime }, toSource(data));
+    const ciphertext = new Blob(parts);
+
+    const upload = await this.createFileUpload(ciphertext.size, options.ttlHours);
+    await this.uploadCiphertext(upload, ciphertext);
+    const done = await this.completeFileUpload(upload.fileKey);
     return {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
+      shareUrl: shareUrlFor(done.downloadUrl, key),
+      fileId: done.fileId,
+      expiresAt: done.expiresAt,
+      verifiedBurn: done.verifiedBurn,
     };
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-    const res = await fetch(url, {
-      ...init,
-      headers: {
-        ...this.authHeaders,
-        ...(init.headers as Record<string, string> | undefined),
-      },
+  /** Low-level: reserves an upload slot for `ciphertextSize` bytes of KNF1 ciphertext. */
+  async createFileUpload(ciphertextSize: number, ttlHours?: number): Promise<FileUpload> {
+    if (!Number.isSafeInteger(ciphertextSize) || ciphertextSize <= 0) {
+      throw new RangeError('ciphertextSize must be a positive integer');
+    }
+    const res = await this.request<ApiCreateFileResponse>('POST', '/api/v1/files', {
+      ciphertext_size: ciphertextSize,
+      ...(ttlHours !== undefined ? { ttl_hours: ttlHours } : {}),
     });
+    return {
+      uploadUrl: res.upload_url,
+      fileKey: res.file_key,
+      uploadHeaders: res.upload_headers ?? {},
+      uploadExpiresIn: res.upload_expires_in,
+      ciphertextSize,
+    };
+  }
 
-    let body: unknown;
-    const ct = res.headers.get('content-type') ?? '';
-    if (ct.includes('application/json')) {
-      body = await res.json();
-    } else {
-      body = await res.text();
+  /**
+   * Low-level: PUTs KNF1 ciphertext to the presigned URL with exactly the server-provided headers.
+   * The API key is not sent. `Content-Length` is derived from the body by `fetch` and must match the slot size.
+   */
+  async uploadCiphertext(upload: FileUpload, ciphertext: Uint8Array | Blob): Promise<void> {
+    const size = isBlob(ciphertext) ? ciphertext.size : ciphertext.byteLength;
+    if (size !== upload.ciphertextSize) {
+      throw new RangeError(`Ciphertext is ${size} bytes but the upload slot expects ${upload.ciphertextSize}`);
     }
 
-    if (!res.ok) {
-      const message =
-        typeof body === 'object' &&
-        body !== null &&
-        'error' in body &&
-        typeof (body as Record<string, unknown>).error === 'string'
-          ? (body as { error: string }).error
-          : `HTTP ${res.status}`;
-      throw new KonfidantApiError(message, res.status, body);
+    // fetch() computes Content-Length from the body (and browsers forbid setting it), so it is not forwarded.
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(upload.uploadHeaders)) {
+      if (name.toLowerCase() === 'content-length') {
+        if (Number(value) !== size) throw new RangeError('upload_headers Content-Length does not match ciphertext');
+        continue;
+      }
+      headers[name] = value;
     }
 
-    return body as T;
-  }
-
-  /**
-   * Encrypt and share a text message.
-   *
-   * @param req - Text content and TTL in hours.
-   * @returns Share URL, text ID, expiry, and burn status.
-   */
-  async shareText(req: ShareTextRequest): Promise<ShareTextResponse> {
-    return this.request<ShareTextResponse>('/api/v1/texts', {
-      method: 'POST',
-      body: JSON.stringify(req),
+    const res = await fetch(upload.uploadUrl, {
+      method: 'PUT',
+      headers,
+      body: ciphertext as Uint8Array<ArrayBuffer> | Blob,
     });
+    if (!res.ok) throw await apiError(res, 'Upload failed');
   }
 
   /**
-   * Request a presigned upload URL for a file.
-   * Use the returned `upload_url` with `uploadFile()` to complete the upload.
-   *
-   * @param req - Filename, file size in bytes, and TTL in hours.
-   * @returns Presigned upload URL, file key, metadata headers, and poll URL.
+   * Low-level: finalizes an uploaded file and returns the server-issued download URL (without the key; append it
+   * with `buildShareUrl(downloadUrl, key)`). Throws `KonfidantApiError` with status 409 / code `upload_incomplete`
+   * if the ciphertext has not been uploaded yet.
    */
-  async shareFile(req: ShareFileRequest): Promise<ShareFileResponse> {
-    return this.request<ShareFileResponse>('/api/v1/files', {
-      method: 'POST',
-      body: JSON.stringify(req),
-    });
-  }
-
-  /**
-   * Poll the encryption status of an uploaded file.
-   * Returns `{ status: 'processing' }` while encryption is in progress,
-   * or the full share details once complete.
-   *
-   * @param fileKey - The `file_key` returned by `shareFile()`.
-   */
-  async getFileStatus(fileKey: string): Promise<FileStatusResponse> {
-    return this.request<FileStatusResponse>(
-      `/api/v1/files/${encodeURIComponent(fileKey)}/status`,
+  async completeFileUpload(fileKey: string): Promise<CompleteFileUploadResult> {
+    const res = await this.request<ApiCompleteFileResponse>(
+      'POST',
+      `/api/v1/files/${encodeURIComponent(fileKey)}/complete`,
     );
+    return {
+      downloadUrl: res.download_url,
+      fileId: res.file_id,
+      expiresAt: res.expires_at,
+      verifiedBurn: res.verified_burn,
+    };
   }
 
-  /**
-   * List all shares for the authenticated organization.
-   *
-   * @param params - Optional filters: type, status, limit, offset.
-   */
+  /** Lists shares of the authenticated organization (metadata only; no content, names or keys). */
   async listShares(params?: ListSharesParams): Promise<ListSharesResponse> {
     const qs = new URLSearchParams();
     if (params?.type) qs.set('type', params.type);
@@ -116,85 +255,11 @@ export class KonfidantClient {
     if (params?.limit !== undefined) qs.set('limit', String(params.limit));
     if (params?.offset !== undefined) qs.set('offset', String(params.offset));
     const query = qs.toString() ? `?${qs.toString()}` : '';
-    return this.request<ListSharesResponse>(`/api/v1/shares${query}`);
+    return this.request<ListSharesResponse>('GET', `/api/v1/shares${query}`);
   }
 
-  /**
-   * Upload a file to the presigned URL obtained from `shareFile()`.
-   * Sends the required S3 metadata headers automatically from `shareFileResponse`.
-   *
-   * @param options.file            - File content as Blob, Buffer, or ArrayBuffer.
-   * @param options.contentType     - MIME type of the file (e.g. "application/zip").
-   * @param options.shareFileResponse - Full response from `shareFile()`.
-   *
-   * @example
-   * const presigned = await client.shareFile({ filename: 'doc.pdf', file_size: buf.length, ttl_hours: 48 });
-   * await client.uploadFile({ file: buf, contentType: 'application/pdf', shareFileResponse: presigned });
-   * const status = await client.getFileStatus(presigned.file_key);
-   */
-  async uploadFile(options: UploadFileOptions): Promise<void> {
-    const { file, contentType, shareFileResponse } = options;
-    const { upload_url, metadata_headers } = shareFileResponse;
-
-    const res = await fetch(upload_url, {
-      method: 'PUT',
-      body: file as BodyInit,
-      headers: {
-        'Content-Type': contentType,
-        'x-amz-meta-organization-id': metadata_headers['x-amz-meta-organization-id'],
-        'x-amz-meta-ttl-hours': metadata_headers['x-amz-meta-ttl-hours'],
-        'x-amz-meta-user-id': metadata_headers['x-amz-meta-user-id'],
-      },
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      throw new KonfidantApiError(
-        `File upload failed: HTTP ${res.status}`,
-        res.status,
-        body,
-      );
-    }
-  }
-
-  /**
-   * Convenience: share a file end-to-end.
-   * Calls `shareFile()`, `uploadFile()`, then polls `getFileStatus()` until complete.
-   *
-   * @param file           - File content as Blob, Buffer, or ArrayBuffer.
-   * @param filename       - Original filename including extension.
-   * @param contentType    - MIME type of the file.
-   * @param ttl_hours      - Time-to-live in hours.
-   * @param pollIntervalMs - How often to poll (default: 2000ms).
-   * @param timeoutMs      - Max total wait time (default: 60000ms).
-   */
-  async shareAndUploadFile(
-    file: Blob | Buffer | ArrayBuffer,
-    filename: string,
-    contentType: string,
-    ttl_hours: number,
-    pollIntervalMs = 2000,
-    timeoutMs = 60000,
-  ): Promise<{ share_url: string; file_id: string; expires_at: string; verified_burn: boolean }> {
-    const fileSize = file instanceof Blob ? file.size : (file as Buffer | ArrayBuffer).byteLength;
-
-    const presigned = await this.shareFile({ filename, file_size: fileSize, ttl_hours });
-    await this.uploadFile({ file, contentType, shareFileResponse: presigned });
-
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const status = await this.getFileStatus(presigned.file_key);
-      if (status.status === 'complete') {
-        return {
-          share_url: status.share_url,
-          file_id: status.file_id,
-          expires_at: status.expires_at,
-          verified_burn: status.verified_burn,
-        };
-      }
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
-    }
-
-    throw new Error(`Encryption timed out after ${timeoutMs}ms`);
+  /** Downloads and decrypts a share link. Equivalent to the standalone `openShare()`; the API key is not sent. */
+  async openShare(shareUrl: string): Promise<OpenedShare> {
+    return openShare(shareUrl);
   }
 }
