@@ -284,21 +284,6 @@ try {
 
 ---
 
-## Migrating from 0.9
-
-0.10 is a breaking release: content is now encrypted client-side.
-
-| 0.9                                                | 0.10                                                       |
-|----------------------------------------------------|------------------------------------------------------------|
-| `shareText({ text, ttl_hours })`                   | `shareText(text, { ttlHours })`                            |
-| `shareFile({ filename, file_size, ttl_hours })` + `uploadFile()` + `getFileStatus()` polling | `shareFile(data, { filename, contentType, ttlHours })` |
-| `shareAndUploadFile(...)`                          | `shareFile(...)`                                           |
-| `share_url`, `text_id`, `file_id`, …               | `shareUrl`, `textId`, `fileId`, … (camelCase results)      |
-| `Share.file_name`                                  | removed (file names are encrypted)                         |
-| —                                                  | `openShare(shareUrl)`, low-level upload methods, KNF1 primitives |
-
----
-
 ## Development
 
 ```bash
