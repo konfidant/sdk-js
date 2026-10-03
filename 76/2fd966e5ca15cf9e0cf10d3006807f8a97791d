@@ -1,0 +1,14 @@
+package.json
+  h_8f86904f171102 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "762fd966e5ca15cf9e0cf10d3006807f8a97791d",
+  "prompts": {},
+  "humans": {
+    "h_8f86904f171102": {
+      "author": "msdundar <msdundars@gmail.com>"
+    }
+  }
+}
