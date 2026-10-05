@@ -4,7 +4,7 @@
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/1ba1a70f10384a8f9a65d4757785b678)](https://app.codacy.com/gh/konfidant/sdk-js/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![Codacy Badge](https://app.codacy.com/project/badge/Coverage/1ba1a70f10384a8f9a65d4757785b678)](https://app.codacy.com/gh/konfidant/sdk-js/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
 
-Official JavaScript/TypeScript SDK for the [Konfidant](https://www.konfidant.app?utm_source=github&utm_medium=jssdk) API.
+Official JavaScript/TypeScript SDK for the [Konfidant](https://www.konfidant.app?utm_source=github&utm_medium=jssdk&utm_campaign=github) API.
 
 Konfidant lets you share secrets — text and files — through one-time links that self-destruct after being read.
 The SDK **encrypts everything on your machine** before it is sent: Konfidant only ever stores and delivers
