@@ -1,0 +1,18 @@
+src/__tests__/knf.test.ts
+  h_8f86904f171102 129-147
+src/index.ts
+  h_8f86904f171102 55
+src/knf.ts
+  h_8f86904f171102 37-41,303-311,319-320,322-328
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "61c17c96b91f502714fe2e67726c99c1af51ab2f",
+  "prompts": {},
+  "humans": {
+    "h_8f86904f171102": {
+      "author": "msdundar <msdundars@gmail.com>"
+    }
+  }
+}
