@@ -126,6 +126,25 @@ describe('encrypt / decrypt', () => {
     }
     expect((await decryptor.finish()).data).toEqual(content);
   });
+
+  it('returns the content as unjoined chunks from finishParts', async () => {
+    const key = generateKey();
+    const content = patterned(20_000);
+    const ciphertext = concat(
+      await encrypt(key, { kind: 'file', name: 'big.bin', mime: 'application/zip' }, bytesSource(content), {
+        chunkSize: 4096,
+      })
+    );
+    const decryptor = new KnfDecryptor(key);
+    await decryptor.push(ciphertext);
+    const result = await decryptor.finishParts();
+
+    expect(result.kind).toBe('file');
+    expect(result.name).toBe('big.bin');
+    expect(result.mime).toBe('application/zip');
+    expect(result.parts.length).toBeGreaterThan(1);
+    expect(concat(result.parts)).toEqual(content);
+  });
 });
 
 describe('tamper resistance', () => {

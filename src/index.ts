@@ -52,4 +52,4 @@ export {
   buildShareUrl,
   parseShareFragment,
 } from './knf';
-export type { KnfKind, KnfMetadata, KnfDecrypted, KnfSource, EncryptOptions } from './knf';
+export type { KnfKind, KnfMetadata, KnfDecrypted, KnfDecryptedParts, KnfSource, EncryptOptions } from './knf';

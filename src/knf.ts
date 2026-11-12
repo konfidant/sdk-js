@@ -34,6 +34,11 @@ export interface KnfDecrypted extends KnfMetadata {
   data: Uint8Array<ArrayBuffer>;
 }
 
+/** Decrypted content as the list of decrypted chunks, so large files never need one contiguous copy. */
+export interface KnfDecryptedParts extends KnfMetadata {
+  parts: Uint8Array<ArrayBuffer>[];
+}
+
 /** Random-access source of content bytes, so large browser files can be encrypted slice by slice. */
 export interface KnfSource {
   size: number;
@@ -295,6 +300,15 @@ export class KnfDecryptor {
   }
 
   async finish(): Promise<KnfDecrypted> {
+    const { parts, ...metadata } = await this.finishParts();
+    return { ...metadata, data: concat(parts) };
+  }
+
+  /**
+   * Like `finish()`, but returns the content as the decrypted chunks without joining them. Wrap them in a Blob
+   * (`new Blob(parts)`) to hand a large file to the browser without holding a second full copy in memory.
+   */
+  async finishParts(): Promise<KnfDecryptedParts> {
     if (this.finished) throw new KnfError('Decryptor already finished');
     if (!this.header) throw new KnfError('Ciphertext truncated');
     if (this.buffer.length <= KNF_TAG_SIZE) throw new KnfError('Ciphertext truncated');
@@ -302,14 +316,16 @@ export class KnfDecryptor {
     this.finished = true;
     this.buffer = new Uint8Array(0);
 
-    const stream = concat(this.plaintext);
+    // Metadata is at most 1 288 bytes and chunks at least 4 096, so it always sits in the first chunk.
+    const parts = this.plaintext;
     this.plaintext = [];
-    const view = new DataView(stream.buffer);
-    if (stream.length < META_LENGTH_PREFIX) throw new KnfError('Metadata truncated');
-    const metaLength = view.getUint32(0);
-    if (META_LENGTH_PREFIX + metaLength > stream.length) throw new KnfError('Metadata truncated');
-    this.metadata = decodeMetadata(stream.subarray(META_LENGTH_PREFIX, META_LENGTH_PREFIX + metaLength));
-    return { ...this.metadata, data: stream.slice(META_LENGTH_PREFIX + metaLength) };
+    const first = parts[0];
+    if (first.length < META_LENGTH_PREFIX) throw new KnfError('Metadata truncated');
+    const metaLength = new DataView(first.buffer, first.byteOffset, first.byteLength).getUint32(0);
+    if (META_LENGTH_PREFIX + metaLength > first.length) throw new KnfError('Metadata truncated');
+    this.metadata = decodeMetadata(first.subarray(META_LENGTH_PREFIX, META_LENGTH_PREFIX + metaLength));
+    parts[0] = first.subarray(META_LENGTH_PREFIX + metaLength);
+    return { ...this.metadata, parts };
   }
 
   private async open(sealed: Uint8Array, last: boolean): Promise<void> {
