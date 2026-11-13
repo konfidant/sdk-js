@@ -3,6 +3,7 @@
 [![Test](https://github.com/konfidant/sdk-js/actions/workflows/test.yml/badge.svg)](https://github.com/konfidant/sdk-js/actions/workflows/test.yml)
 [![Codacy Badge](https://app.codacy.com/project/badge/Grade/1ba1a70f10384a8f9a65d4757785b678)](https://app.codacy.com/gh/konfidant/sdk-js/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![Codacy Badge](https://app.codacy.com/project/badge/Coverage/1ba1a70f10384a8f9a65d4757785b678)](https://app.codacy.com/gh/konfidant/sdk-js/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
+[![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=konfidant_sdk-js&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=konfidant_sdk-js)
 
 Official JavaScript/TypeScript SDK for the [Konfidant](https://www.konfidant.app?utm_source=github&utm_medium=jssdk&utm_campaign=github) API.
 
