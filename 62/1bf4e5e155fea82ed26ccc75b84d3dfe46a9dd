@@ -1,0 +1,23 @@
+package.json
+  s_2acef6a2740484::t_6db36637638f38 46
+tsconfig.json
+  s_2acef6a2740484::t_6db36637638f38 9
+package-lock.json
+  s_2acef6a2740484::t_fd95921b40b3d5 17,5919-5921
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "621bf4e5e155fea82ed26ccc75b84d3dfe46a9dd",
+  "prompts": {},
+  "sessions": {
+    "s_2acef6a2740484": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "03616b9a-1562-49bb-a4d5-e6c47fa3a33f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "msdundar <msdundars@gmail.com>"
+    }
+  }
+}
